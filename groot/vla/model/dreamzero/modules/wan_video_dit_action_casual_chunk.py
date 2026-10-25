@@ -1776,8 +1776,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if action is not None:
             assert timestep_action is not None
             assert state_features is not None
-            stride = timestep_action.shape[1] // state_features.shape[1]
-            timestep_state = timestep_action[:, ::stride]
+            # every state token of a block gets the timestep of the block's first action (num_state_per_block = 1:
+            # timestep_action[:, ::num_action_per_block], as before)
+            n_blocks = state_features.shape[1] // self.num_state_per_block
+            timestep_state = timestep_action.reshape(timestep_action.shape[0], n_blocks, -1)[:, :, :1]
+            timestep_state = timestep_state.expand(-1, -1, self.num_state_per_block).reshape(timestep_action.shape[0], -1)
             timestep = torch.cat([timestep, timestep_action, timestep_state], dim=1)
 
         e = self.time_embedding(
@@ -2076,8 +2079,11 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if action is not None:
             assert timestep_action is not None
             assert state_features is not None
-            stride = timestep_action.shape[1] // state_features.shape[1]
-            timestep_state = timestep_action[:, ::stride]
+            # every state token of a block gets the timestep of the block's first action (num_state_per_block = 1:
+            # timestep_action[:, ::num_action_per_block], as before)
+            n_blocks = state_features.shape[1] // self.num_state_per_block
+            timestep_state = timestep_action.reshape(timestep_action.shape[0], n_blocks, -1)[:, :, :1]
+            timestep_state = timestep_state.expand(-1, -1, self.num_state_per_block).reshape(timestep_action.shape[0], -1)
             timestep = torch.cat([timestep, timestep_action, timestep_state], dim=1)
 
         e = self.time_embedding(

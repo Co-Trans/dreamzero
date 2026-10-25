@@ -114,6 +114,9 @@ class WANPolicyHeadConfig(PretrainedConfig):
     video_noise_beta_beta: float = field(
         default=1.0, metadata={"help": "Beta beta for video noise. Keep at 1.0."}
     )
+    # Loss weights: the action loss per action dim (the first len(list) dims; the rest 1) and the video loss's
+    action_loss_weights: list = field(default=None, metadata={"help": "Per-dim weights of the action loss, for the first dims."})
+    video_loss_weight: float = field(default=1.0, metadata={"help": "Weight of the video (dynamics) loss in the total loss."})
     # Decoupled inference config - allows video to stay noisy while action fully denoises
     decouple_inference_noise: bool = field(
         default=False, metadata={"help": "Use decoupled noise schedules during inference (video stays noisy, action fully denoises)."}
@@ -701,7 +704,9 @@ class WANPolicyHead(ActionHead):
         if actions.numel() > 0:
             noise_action = torch.randn_like(actions)
             assert actions.shape[1] / (noise.shape[1]-1) == (self.model.num_action_per_block // self.num_frame_per_block), f"actions.shape, {actions.shape}, noise.shape, {noise.shape}, video.shape, {videos.shape}, latents.shape, {latents.shape}"
-            assert (noise.shape[1]-1) / state_features.shape[1] == (self.num_frame_per_block // self.model.num_state_per_block), f"state_features.shape, {state_features.shape}, noise.shape, {noise.shape}, video.shape, {videos.shape}, latents.shape, {latents.shape}"
+            # num_state_per_block state tokens per block of num_frame_per_block latents (the original check, latents per
+            # state token, needs num_state_per_block <= num_frame_per_block)
+            assert state_features.shape[1] == (noise.shape[1] - 1) // self.num_frame_per_block * self.model.num_state_per_block, f"state_features.shape, {state_features.shape}, noise.shape, {noise.shape}, video.shape, {videos.shape}, latents.shape, {latents.shape}"
             
             # ============ ACTION TIMESTEP SAMPLING ============
             if self.config.decouple_video_action_noise:
@@ -793,14 +798,18 @@ class WANPolicyHead(ActionHead):
                     action_noise_pred.float(), training_target_action.float(), reduction='none'
                 ) * action_mask  # shape: [B, ...]
                 action_loss_per_sample = has_real_action[:, None].float() * action_loss_per_sample  # apply has_real_action
+                if self.config.action_loss_weights:
+                    dim_weights = torch.ones(action_loss_per_sample.shape[-1], device=action_loss_per_sample.device)
+                    dim_weights[: len(self.config.action_loss_weights)] = torch.tensor(self.config.action_loss_weights, dtype=torch.float32)
+                    action_loss_per_sample = action_loss_per_sample * dim_weights
                 weight_action = action_loss_per_sample.mean(dim=2) * self.scheduler.training_weight(
                     timestep_action.flatten(0, 1),
                 ).unflatten(0, (noise_action.shape[0], noise_action.shape[1])).to(self._device)
                 weighted_action_loss = weight_action.mean()
-                loss = weighted_dynamics_loss + weighted_action_loss
+                loss = self.config.video_loss_weight * weighted_dynamics_loss + weighted_action_loss
             else:
                 weighted_action_loss = torch.tensor(0.0, device=self._device)
-                loss = weighted_dynamics_loss
+                loss = self.config.video_loss_weight * weighted_dynamics_loss
             # loss = dynamics_loss_per_sample.mean()
 
         # Record log

@@ -708,6 +708,14 @@ class BaseExperiment(ABC):
             ckpt_dir = cfg.pretrained_model_path
             safetensors_index_path = os.path.join(ckpt_dir, "model.safetensors.index.json")
             safetensors_path = os.path.join(ckpt_dir, "model.safetensors")
+            own = model.state_dict()
+
+            def load(state_dict):
+                # weights of another shape stay as initialized (e.g. the state encoder under another max_state_dim)
+                skip = [k for k, v in state_dict.items() if k in own and own[k].shape != v.shape]
+                if skip:
+                    mprint(f"Not loaded (shape differs): {skip}")
+                model.load_state_dict({k: v for k, v in state_dict.items() if k not in skip}, strict=False)
 
             if os.path.exists(safetensors_index_path):
                 with open(safetensors_index_path, 'r') as f:
@@ -716,12 +724,12 @@ class BaseExperiment(ABC):
                     shard_path = os.path.join(ckpt_dir, shard_file)
                     mprint(f"Loading shard: {shard_path}")
                     shard_state_dict = load_file(shard_path)
-                    model.load_state_dict(shard_state_dict, strict=False)
+                    load(shard_state_dict)
                     del shard_state_dict
                     gc.collect()
             elif os.path.exists(safetensors_path):
                 state_dict = load_file(safetensors_path)
-                model.load_state_dict(state_dict, strict=False)
+                load(state_dict)
             else:
                 raise FileNotFoundError(
                     f"No weights found at '{ckpt_dir}'. "

@@ -327,8 +327,15 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         self,
         *args,
         num_steps_per_shard: int = int(1e4),
+        chunk_rows: int = 24,
+        video_stride: int = 3,
         **kwargs,
     ):
+        """chunk_rows: dataset rows per action chunk (one block); video_stride: rows between its video frames. A
+        block has 8 video frames (2 latents), so chunk_rows must be 8 x video_stride (DROID: 24 rows at 15 Hz, a frame
+        every 3rd row)."""
+        assert chunk_rows == 8 * video_stride, f"{chunk_rows=} must be 8 x {video_stride=}"
+        self.chunk_rows, self.video_stride = chunk_rows, video_stride
         self.args = args
         self.kwargs = kwargs
         super().__init__(*args, **kwargs)
@@ -801,7 +808,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                 if target_num_chunks is not None and len(sampled_list) >= target_num_chunks:
                     return
                 # Require full 32-length window to exist for alignment with action/video
-                if 0 <= anchor_index and anchor_index + 24 < trajectory_length:
+                if 0 <= anchor_index and anchor_index + self.chunk_rows < trajectory_length:
                     sampled_list.append(int(anchor_index))
 
             # Always include first_idx anchor
@@ -817,7 +824,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                     break
                     
                 if not back_done:
-                    back_anchor = first_idx - 24 * step
+                    back_anchor = first_idx - self.chunk_rows * step
                     if back_anchor < 0:
                         back_done = True
                     elif language_annotations[back_anchor] != target_language:
@@ -827,7 +834,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                 if len(sampled_list) >= max_frames:
                     break
                 if not fwd_done:
-                    fwd_anchor = first_idx + 24 * step
+                    fwd_anchor = first_idx + self.chunk_rows * step
                     if fwd_anchor >= trajectory_length:
                         fwd_done = True
                     elif language_annotations[fwd_anchor] != target_language:
@@ -959,20 +966,20 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                 target_num_chunks = self._current_num_chunks[first_idx]
                 # print(f"Using target_num_chunks from video: {target_num_chunks}")
             
-            max_frames = 24 * self.max_chunk_size
-            per_step_offsets = list(range(24))  # 0..23
+            max_frames = self.chunk_rows * self.max_chunk_size
+            per_step_offsets = list(range(self.chunk_rows))  # 0..chunk_rows-1
             sampled_list: list[int] = []
 
             def add_step_set(anchor_index: int) -> None:
                 nonlocal sampled_list
                 # Ensure the whole 32-length chunk fits within bounds
-                if anchor_index < 0 or anchor_index + 24 >= trajectory_length:
+                if anchor_index < 0 or anchor_index + self.chunk_rows >= trajectory_length:
                     return
                 # Ensure we don't overrun the max_frames cap with a partial chunk
-                if len(sampled_list) + 24 > max_frames:
+                if len(sampled_list) + self.chunk_rows > max_frames:
                     return
                 # If we have a target number of chunks, stop when we reach it
-                if target_num_chunks is not None and len(sampled_list) // 24 >= target_num_chunks:
+                if target_num_chunks is not None and len(sampled_list) // self.chunk_rows >= target_num_chunks:
                     return
                 for offset in per_step_offsets:
                     idx = anchor_index + offset
@@ -987,11 +994,11 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             fwd_done = False
             while len(sampled_list) < max_frames and (not back_done or not fwd_done):
                 # Stop if we've reached the target number of chunks
-                if target_num_chunks is not None and len(sampled_list) // 24 >= target_num_chunks:
+                if target_num_chunks is not None and len(sampled_list) // self.chunk_rows >= target_num_chunks:
                     break
                     
                 if not back_done:
-                    back_anchor = first_idx - 24 * step
+                    back_anchor = first_idx - self.chunk_rows * step
                     if back_anchor < 0:
                         back_done = True
                     elif language_annotations[back_anchor] != target_language:
@@ -1001,7 +1008,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                 if len(sampled_list) >= max_frames:
                     break
                 if not fwd_done:
-                    fwd_anchor = first_idx + 24 * step
+                    fwd_anchor = first_idx + self.chunk_rows * step
                     if fwd_anchor >= trajectory_length:
                         fwd_done = True
                     elif language_annotations[fwd_anchor] != target_language:
@@ -1014,7 +1021,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                 unique_sorted = np.array(sorted(set(sampled_list)), dtype=int)
                 # Enforce divisibility by 30 and the 480 cap
                 capped_size = min(unique_sorted.size, max_frames)
-                divisible_size = (capped_size // 24) * 24
+                divisible_size = (capped_size // self.chunk_rows) * self.chunk_rows
                 sampled_indices = unique_sorted[:divisible_size]
             else:
                 sampled_indices = np.array([], dtype=int)
@@ -1048,7 +1055,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
                 action_key=key,
                 sampled_indices=sampled_indices,
                 trajectory_id=trajectory_id,
-                chunk_size=24,
+                chunk_size=self.chunk_rows,
             )
             # print("action data after convert", action_data[0], action_data[-1], key)
         
@@ -1157,14 +1164,14 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         # - keeping language consistent with target_language at the anchor step,
         # - and limiting the total collected frames to 81.
         max_frames = 8 * self.max_chunk_size + 1
-        per_step_offsets = [0, 3, 6, 9, 12, 15, 18, 21]
+        per_step_offsets = list(range(0, self.chunk_rows, self.video_stride))  # DROID: [0, 3, ..., 21]
         sampled_list: list[int] = []
         
         def add_step_set(anchor_index: int) -> None:
             # Only add a complete 4-frame set if it fully fits and capacity allows
             # Require full 32-frame window to exist for alignment with action/state
             nonlocal sampled_list
-            if anchor_index < 0 or anchor_index + 23 >= trajectory_length:
+            if anchor_index < 0 or anchor_index + self.chunk_rows - 1 >= trajectory_length:
                 return
             if len(sampled_list) + len(per_step_offsets) > max_frames:
                 return
@@ -1182,7 +1189,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         while len(sampled_list) < max_frames and (not back_done or not fwd_done):
             # Backward step
             if not back_done:
-                back_anchor = first_idx - 24 * step
+                back_anchor = first_idx - self.chunk_rows * step
                 if back_anchor < 0:
                     back_done = True
                 elif language_annotations[back_anchor] != target_language:
@@ -1193,7 +1200,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
             if len(sampled_list) >= max_frames:
                 break
             if not fwd_done:
-                fwd_anchor = first_idx + 24 * step
+                fwd_anchor = first_idx + self.chunk_rows * step
                 if fwd_anchor >= trajectory_length:
                     fwd_done = True
                 elif language_annotations[fwd_anchor] != target_language:
@@ -1214,7 +1221,7 @@ class ShardedLeRobotSubLangSingleActionChunkDatasetDROID(LeRobotSingleDataset):
         if unique_sorted.size > 0:
             # Get the last index and add one more frame with 8-frame stride
             last_idx = unique_sorted[-1]
-            additional_idx = last_idx + 3
+            additional_idx = last_idx + self.video_stride
             
             # Only add if it doesn't exceed trajectory bounds and max_frames
             if additional_idx < trajectory_length and unique_sorted.size < max_frames:

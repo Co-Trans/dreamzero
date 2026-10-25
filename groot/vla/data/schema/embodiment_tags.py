@@ -155,6 +155,12 @@ class EmbodimentTag(Enum):
 
     YAM = "yam"
 
+    G1_CARRY = "g1_carry"
+    """
+    Two Unitree G1 carrying a payload together (WAM_CT, Co-Trans/G1_Collaborate_Transport): one robot's head camera,
+    joints, wrench and payload belief; actions at 6.25 Hz.
+    """
+
     DREAM = "dream"
     """
     The datasets with DREAM actions.

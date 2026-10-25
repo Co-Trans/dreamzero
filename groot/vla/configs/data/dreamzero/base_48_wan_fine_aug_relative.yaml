@@ -343,6 +343,97 @@ transform_yam:
 
 
 ################################################################################
+# g1_carry (WAM_CT: two Unitree G1 carry a payload; one robot's head camera at 6.25 Hz, a row per expert step;
+#           state: joints 29, payload belief g 15, odometry 4, measured palms 18, h_int 12 (each hand's wrench, until
+#           the belief estimator's internal state exists), plan 16 x 15; action 18 = pelvis 4 + palms 14)
+# A block is 8 rows (1.28 s): 8 frames and 8 actions (dataset_kwargs chunk_rows 8, video_stride 1).
+# g1_carry_state_keys and g1_carry_state_normalization choose the state keys (without state.plan:
+# g1_carry_state_keys=[state.joint_pos,state.g,state.odom,state.palms,state.h_int] 'g1_carry_state_normalization=${g1_carry_norm_noplan}').
+# With state.plan (the last key) the transform makes the plan 16 extra state tokens per block
+# (model_specific_transform.plan_steps 16, num_state_per_block 17).
+################################################################################
+
+g1_carry_state_keys: [state.joint_pos, state.g, state.odom, state.palms, state.h_int, state.plan]
+g1_carry_norm_plan:
+  state.joint_pos: q99
+  state.g: q99
+  state.odom: q99
+  state.palms: q99
+  state.h_int: q99
+  state.plan: q99
+g1_carry_norm_noplan:
+  state.joint_pos: q99
+  state.g: q99
+  state.odom: q99
+  state.palms: q99
+  state.h_int: q99
+g1_carry_state_normalization: ${g1_carry_norm_plan}  # its keys must be the state keys
+
+modality_config_g1_carry:
+  video:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    eval_delta_indices: [0]
+    modality_keys:
+      - video.head
+  state:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0]
+    modality_keys: ${g1_carry_state_keys}
+  action:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0, 1, 2, 3, 4, 5, 6, 7]
+    modality_keys:
+      - action.pelvis
+      - action.palms
+  language:
+    _target_: groot.vla.data.dataset.ModalityConfig
+    delta_indices: [0]
+    modality_keys:
+      - annotation.task
+
+transform_g1_carry:
+  _target_: groot.vla.data.transform.ComposedModalityTransform
+  transforms:
+    # Video transforms
+    - <<: *totensor_cfg
+      apply_to: ${modality_config_g1_carry.video.modality_keys}
+    - <<: *crop_cfg
+      apply_to: ${modality_config_g1_carry.video.modality_keys}
+    - <<: *resize_cfg
+      apply_to: ${modality_config_g1_carry.video.modality_keys}
+    - <<: *color_jitter_cfg
+      apply_to: ${modality_config_g1_carry.video.modality_keys}
+    - <<: *to_numpy_cfg
+      apply_to: ${modality_config_g1_carry.video.modality_keys}
+
+    # State transforms
+    - _target_: groot.vla.data.transform.StateActionToTensor
+      apply_to: ${modality_config_g1_carry.state.modality_keys}
+    - _target_: groot.vla.data.transform.StateActionTransform
+      apply_to: ${modality_config_g1_carry.state.modality_keys}
+      normalization_modes: ${g1_carry_state_normalization}
+
+    # Action transforms
+    - _target_: groot.vla.data.transform.StateActionToTensor
+      apply_to: ${modality_config_g1_carry.action.modality_keys}
+    - _target_: groot.vla.data.transform.StateActionTransform
+      apply_to: ${modality_config_g1_carry.action.modality_keys}
+      normalization_modes:
+        action.pelvis: q99
+        action.palms: q99
+
+    # ConcatTransform
+    - _target_: groot.vla.data.transform.ConcatTransform
+      video_concat_order: ${modality_config_g1_carry.video.modality_keys}
+      state_concat_order: ${modality_config_g1_carry.state.modality_keys}
+      action_concat_order: ${modality_config_g1_carry.action.modality_keys}
+
+    # Model-specific transform
+    - ${model_specific_transform}
+
+
+################################################################################
 # Modality Configs
 ################################################################################
 
@@ -350,6 +441,7 @@ modality_configs:
   oxe_droid: ${modality_config_oxe_droid}
   agibot: ${modality_config_agibot}
   yam: ${modality_config_yam}
+  g1_carry: ${modality_config_g1_carry}
 
 ################################################################################
 # Transforms
@@ -359,6 +451,7 @@ transforms:
   oxe_droid: ${transform_oxe_droid}
   agibot: ${transform_agibot}
   yam: ${transform_yam}
+  g1_carry: ${transform_g1_carry}
 
 ################################################################################
 # Metadata Versions
@@ -368,6 +461,7 @@ metadata_versions:
   oxe_droid: '0221'
   agibot: '0221'
   yam: '0221'
+  g1_carry: '0221'
 
 ################################################################################
 # FPS (per embodiment, null means use dataset default)

@@ -124,6 +124,8 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
                         processed_item = "A multi-view video shows that a robot " + processed_item.lower() + " The video is split into four views: The top-left view shows the camera view from the robot's head, the top-right view shows the camera view from the right hand, the bottom-left view shows the camera view from the left hand, and the bottom-right view is a black screen (inactive view). The robot " + processed_item.lower()
                     elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.YAM.value]:
                         processed_item = "A multi-view video shows that a robot " + processed_item.lower() + " The video is split into four views: The top-left view shows the top camera, the top-right view shows the right camera, the bottom-left view shows the left camera, and the bottom-right view is a black screen. The robot " + processed_item.lower()
+                    elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.G1_CARRY.value]:
+                        processed_item = "A single view video from its head camera shows that a humanoid robot " + processed_item.lower() + " The robot " + processed_item.lower()
                     else:
                         raise ValueError(f"Embodiment ID {elem['embodiment_id']} not supported.") 
                     output_values.append(processed_item)  
@@ -146,6 +148,8 @@ def collate(features: List[dict], tokenizer: AutoTokenizer, num_views=3, embodim
                         item = "A multi-view video shows that a robot " + str(item).lower() + " The video is split into four views: The top-left view shows the camera view from the robot's head, the top-right view shows the camera view from the right hand, the bottom-left view shows the camera view from the left hand, and the bottom-right view is a black screen (inactive view). The robot " + str(item).lower()
                     elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.YAM.value]:
                         item = "A multi-view video shows that a robot " + str(item).lower() + " The video is split into four views: The top-left view shows the top camera, the top-right view shows the right camera, the bottom-left view shows the left camera, and the bottom-right view is a black screen. The robot " + str(item).lower()
+                    elif elem["embodiment_id"] == embodiment_tag_mapping[EmbodimentTag.G1_CARRY.value]:
+                        item = "A single view video from its head camera shows that a humanoid robot " + str(item).lower() + " The robot " + str(item).lower()
                     else:
                         raise ValueError(f"Embodiment ID {elem['embodiment_id']} not supported.")   
                     output_values.append(item)
@@ -215,6 +219,12 @@ class DreamTransform(InvertibleModalityTransform):
     state_horizon: int
     action_horizon: int
     num_views: int = 3
+    plan_steps: int = Field(
+        default=0,
+        description="If > 0, the last plan_steps * plan_step_dim dims of each chunk's state are a plan; _prepare_state "
+        "makes them plan_steps extra state tokens (num_state_per_block = 1 + plan_steps).",
+    )
+    plan_step_dim: int = Field(default=15, description="Dims of one plan step.")
 
     # Add tokenizer attribute
     tokenizer_path: str = Field(
@@ -472,6 +482,21 @@ class DreamTransform(InvertibleModalityTransform):
         n_state_tokens = state.shape[0]
         return state, state_mask, n_state_tokens
 
+    def _prepare_state_and_plan(self, data: dict):
+        """Each chunk's state (rows of [proprio, plan]) as 1 + plan_steps tokens: the proprio, then each plan step
+        followed by a one-hot of its index, each padded to max_state_dim. Returns (state, state_mask, n_state_tokens)."""
+        state = np.asarray(data["state"])
+        P, d = self.plan_steps, self.plan_step_dim
+        n_proprio = state.shape[-1] - P * d
+        assert 0 < n_proprio <= self.max_state_dim and d + P <= self.max_state_dim, f"{state.shape=}, {P=}, {d=}"
+        rows = np.zeros((state.shape[0], 1 + P, self.max_state_dim), dtype=state.dtype)
+        mask = np.zeros(rows.shape, dtype=bool)
+        rows[:, 0, :n_proprio], mask[:, 0, :n_proprio] = state[:, :n_proprio], True
+        rows[:, 1:, :d] = state[:, n_proprio:].reshape(-1, P, d)
+        rows[:, 1:, d:d + P] = np.eye(P, dtype=state.dtype)
+        mask[:, 1:, :d + P] = True
+        return rows.reshape(-1, self.max_state_dim), mask.reshape(-1, self.max_state_dim), rows.shape[0] * (1 + P)
+
     def _prepare_action(self, data: dict):
         """
         Pad to max_action_dim, return masks.
@@ -512,7 +537,10 @@ class DreamTransform(InvertibleModalityTransform):
         vlm_outputs = self._apply_vlm_processing(batch_data)
 
         # 2) Prepare state
-        state, state_mask, _ = self._prepare_state(data)
+        if self.plan_steps > 0 and "state" in data:
+            state, state_mask, _ = self._prepare_state_and_plan(data)
+        else:
+            state, state_mask, _ = self._prepare_state(data)
         transformed_data["state"] = state
         transformed_data["state_mask"] = state_mask
 
